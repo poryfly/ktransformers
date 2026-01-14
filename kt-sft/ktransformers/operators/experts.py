@@ -1451,12 +1451,12 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
 
             # Create buffer tensors (will be updated before each forward)
             # NOTE: No need for .cpu() since experts are already on CPU (moved above)
-            instance.gate_lora_A = torch.stack(gate_lora_A_list, dim=0).contiguous()
-            instance.gate_lora_B = torch.stack(gate_lora_B_list, dim=0).contiguous()
-            instance.up_lora_A = torch.stack(up_lora_A_list, dim=0).contiguous()
-            instance.up_lora_B = torch.stack(up_lora_B_list, dim=0).contiguous()
-            instance.down_lora_A = torch.stack(down_lora_A_list, dim=0).contiguous()
-            instance.down_lora_B = torch.stack(down_lora_B_list, dim=0).contiguous()
+            instance.gate_lora_A = torch.stack(gate_lora_A_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.gate_lora_B = torch.stack(gate_lora_B_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.up_lora_A = torch.stack(up_lora_A_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.up_lora_B = torch.stack(up_lora_B_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.down_lora_A = torch.stack(down_lora_A_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.down_lora_B = torch.stack(down_lora_B_list, dim=0).to(torch.bfloat16).contiguous()
 
             # # TODO: Optional debug output - can be removed if not needed
             # print(f"[{instance.key}] LoRA weights stacked:")
@@ -1593,6 +1593,9 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                     instance_info['up_lora_B'][i].copy_(up_lora_B_list[i])
                     instance_info['down_lora_A'][i].copy_(down_lora_A_list[i])
                     instance_info['down_lora_B'][i].copy_(down_lora_B_list[i])
+                # Update LoRA weights in C++ AMX buffers
+                cpu_infer.submit(moe.update_lora())
+                cpu_infer.sync()
 
         # Same forward logic as KSFTExpertsCPU
         if input_tensor.size(0) == 1 and torch.cuda.is_current_stream_capturing():
@@ -1645,11 +1648,12 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, output_grad):
-        # Same backward logic as KSFTExpertsCPU
+        # Not Same backward logic as KSFTExpertsCPU
         input_tensor, expert_ids, weights = ctx.saved_tensors
 
         output_grad = output_grad.contiguous().cpu()
         input_grad = torch.empty_like(input_tensor).contiguous()
+        grad_weights = torch.zeros_like(weights, dtype=torch.float32).contiguous()
 
         # Clear gradient buffers before backward pass (avoid accumulating stale gradients)
         if ctx.layer_idx in KSFTRouteExpertsCPU._instance_map:
@@ -1662,6 +1666,11 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 instance_info['grad_down_lora_A'].zero_()
                 instance_info['grad_down_lora_B'].zero_()
 
+            # Update LoRA weights in C++ AMX buffers before backward
+            if 'lora_params_list' in instance_info:
+                ctx.cpu_infer.submit(ctx.moe.update_lora())
+                ctx.cpu_infer.sync()
+
         bw_start = time.time()
         ctx.cpu_infer.submit(
             ctx.moe.backward(
@@ -1672,6 +1681,7 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 input_tensor.data_ptr(),
                 output_grad.data_ptr(),
                 input_grad.data_ptr(),
+                grad_weights.data_ptr(),
             )
         )
         ctx.cpu_infer.sync()
@@ -1719,7 +1729,7 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                         gate_B_grad_mean = param_lists[1][0].grad.abs().mean().item() if param_lists[1][0].grad is not None else 0.0
                         # print(f"[Layer {ctx.layer_idx} Backward] lora_B: mean={gate_B_mean:.6f}, grad_mean={gate_B_grad_mean:.6f}")
 
-        return input_grad.to(device=ctx.out_device), None, None, None, None, None, None
+        return input_grad.to(device=ctx.out_device), None, grad_weights.to(device=ctx.out_device), None, None, None, None
 
     def unload(self):
         return
@@ -2786,5 +2796,3 @@ class KQwen3MoeSparseMoeBlock(BaseInjectedModule, Qwen3MoeSparseMoeBlock):
             .type(new_x.dtype)
         )
         return final_out
-
-

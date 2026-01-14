@@ -35,6 +35,7 @@ from tqdm import tqdm
 import os, json
 from pathlib import Path
 from accelerate import Accelerator
+from ktransformers.util.trainer_utils import KAccelerator
 if is_accelerate_available("0.28.0"):
     from accelerate.utils import DataLoaderConfiguration
 from accelerate import __version__ as accelerate_version
@@ -46,23 +47,6 @@ if is_sagemaker_mp_enabled():
 from ktransformers.sft.peft_utils.mapping import get_peft_model
 
 logger = logging.get_logger(__name__)
-
-class KAccelerator(Accelerator):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("device_placement", False)
-        super().__init__(*args, **kwargs)
-        
-    def prepare_model(self, model, *args, **kwargs):
-        return model
-    
-    def prepare(self, *args, **kwargs):
-        prepped = []
-        for obj in args:
-            if isinstance(obj, nn.Module):
-                prepped.append(self.prepare_model(obj, **kwargs))
-            else:
-                prepped.append(super().prepare(obj, **kwargs))
-        return tuple(prepped) if len(prepped) > 1 else prepped[0]
 
 class KTrainer(Trainer):
     def save_model(self, output_dir=None, _internal_call=False):
@@ -321,49 +305,12 @@ class KTrainer(Trainer):
         if ret.device != self.args.device:
             ret = ret.to(self.args.device, non_blocking=True)
 
-        # if os.environ.get("KT_DBG_STEP", "0") == "1" and not hasattr(self, "_kt_dbg_once"):
-        #     try:
-        #         print(f"[KT-DBG] args.device={self.args.device}  loss(before)={loss.device}  loss(return)={ret.device}")
-        #     except Exception:
-        #         pass
-        #     self._kt_dbg_once = True
-
-        # # Debug: Print LoRA parameters for routed experts
-        # try:
-        #     print(f"\n[DEBUG] Step {self.state.global_step} - Loss: {ret.item():.6f}")
-
-        #     # Access the base model: PeftModelForCausalLM -> LoraModel -> DeepseekV2ForCausalLM -> DeepseekV2Model
-        #     base_model = model
-        #     if hasattr(model, 'base_model'):
-        #         base_model = model.base_model
-        #     if hasattr(base_model, 'model'):
-        #         base_model = base_model.model
-        #     # DeepseekV2ForCausalLM has a .model attribute that contains DeepseekV2Model with .layers
-        #     if hasattr(base_model, 'model'):
-        #         base_model = base_model.model
-
-        #     # Print LoRA A and B for first 3 routed experts in layer 1
-        #     layer_idx = 1
-        #     if hasattr(base_model, 'layers') and len(base_model.layers) > layer_idx:
-        #         layer = base_model.layers[layer_idx]
-        #         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
-        #             experts_wrapper = layer.mlp.experts
-        #             if hasattr(experts_wrapper, 'orig_module'):
-        #                 experts_list = experts_wrapper.orig_module
-        #                 for expert_idx in range(min(3, len(experts_list))):
-        #                     expert = experts_list[expert_idx]
-        #                     if hasattr(expert, 'gate_proj'):
-        #                         gate_proj = expert.gate_proj
-        #                         if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
-        #                             lora_A_weight = gate_proj.lora_A['default'].weight
-        #                             lora_B_weight = gate_proj.lora_B['default'].weight
-        #                             print(f"  Expert {expert_idx} gate_proj:")
-        #                             print(f"    lora_A: {lora_A_weight}")
-        #                             print(f"    lora_B: {lora_B_weight}")
-        # except Exception as e:
-        #     import traceback
-        #     print(f"[DEBUG] Failed to print LoRA parameters: {e}")
-        #     traceback.print_exc()
+        if os.environ.get("KT_DBG_STEP", "0") == "1" and not hasattr(self, "_kt_dbg_once"):
+            try:
+                print(f"[KT-DBG] args.device={self.args.device}  loss(before)={loss.device}  loss(return)={ret.device}")
+            except Exception:
+                pass
+            self._kt_dbg_once = True
 
         return ret
 
@@ -434,15 +381,12 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
             "kv_a_proj_with_mqa",
             "kv_b_proj",
             "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-            # "mlp.gate_proj",
-            # "mlp.up_proj",
-            # "mlp.down_proj",
-            # "shared_experts.gate_proj",l
-            # "shared_experts.up_proj",
-            # "shared_experts.down_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+            "shared_experts.gate_proj",
+            "shared_experts.up_proj",
+            "shared_experts.down_proj",
         ],
         r=8,
         lora_alpha=32,
@@ -450,7 +394,7 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-    print(model)
+    
     train_dataset = SFTJsonListDataset(sft_data_path, tokenizer, max_len=512)
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
@@ -462,7 +406,7 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
         # max_steps=30, # TODO: FOR TEST, will override any value given in num_train_epochs
         learning_rate=1e-4,
         fp16=False,
-        logging_steps=1,
+        logging_steps=10,
         save_steps=200,
         dataloader_drop_last=True,
         ddp_find_unused_parameters=False,
@@ -471,13 +415,12 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
     debug_path = os.path.join(save_adapter_path, "model_infra_debug.json")
     with open(debug_path, "w", encoding="utf-8") as f:
         json.dump({"model": str(model)}, f, ensure_ascii=False, indent=2)
-
-    # output = model(input_ids=torch.tensor([[1,2,3]], dtype=torch.int32, device="cuda:0"), use_cache=False)
+    
+    # output = model(input_ids=torch.tensor([[1,2,3]], dtype=torch.int32, device="cuda:0"))
     # loss = output.logits.mean()
         
     # dot = make_dot(loss, params=dict(model.named_parameters()))
-    # dot.render("KT_compute_route_moe_model_graph", format="svg")
-    # print(xx)
+    # dot.render("KT_compute_cpuinfer_moe_model_graph", format="svg")
     
     trainer = KTrainer(
         model=model,
@@ -486,7 +429,6 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
         train_dataset=train_dataset,
         data_collator=data_collator,
     )
-    trainer.model_accepts_loss_kwargs = False
     model.config.use_cache = False
     # model.gradient_checkpointing_enable()
     # if hasattr(model, "enable_input_require_grads"):
