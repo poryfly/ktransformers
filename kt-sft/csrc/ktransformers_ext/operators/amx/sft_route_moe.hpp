@@ -3024,6 +3024,7 @@ public:
 
             // Convert to f32 for computation
             float *lora_inter = (float *)bak_gate_lora_inter_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic) 
             for (int t = 0; t < num_tokens; t++) {
               for (int r = 0; r < padded_lora_rank_; r++) {
                 lora_inter[t * padded_lora_rank_ + r] = ggml_bf16_to_fp32(lora_inter_bf16[t * padded_lora_rank_ + r]);
@@ -3035,6 +3036,7 @@ public:
 
             // Pre-convert gate_grad to fp32 to avoid redundant conversions in inner loop
             float *gate_grad_f32 = (float *)bak_gate_grad_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int i = 0; i < config_.intermediate_size; i++) {
                 gate_grad_f32[t * config_.intermediate_size + i] = ggml_bf16_to_fp32(gate_grad[t * config_.intermediate_size + i]);
@@ -3044,9 +3046,11 @@ public:
             float scaling = config_.lora_scaling;
 
             // grad_B[i, r] += sum_t(gate_grad[t,i] * lora_inter[t,r]) * scaling
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int i = 0; i < config_.intermediate_size; i++) {
               for (int r = 0; r < config_.lora_rank; r++) {
                 float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int t = 0; t < num_tokens; t++) {
                   sum += gate_grad_f32[t * config_.intermediate_size + i] * lora_inter[t * padded_lora_rank_ + r];
                 }
@@ -3090,6 +3094,7 @@ public:
             lora_gate_temp_grad_bc_[expert_idx]->to_mat(num_tokens, temp_grad_bf16, 0, 1);
 
             float *temp_grad = (float *)bak_gate_temp_grad_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int r = 0; r < padded_lora_rank_; r++) {
                 temp_grad[t * padded_lora_rank_ + r] = ggml_bf16_to_fp32(temp_grad_bf16[t * padded_lora_rank_ + r]);
@@ -3101,6 +3106,7 @@ public:
 
             // Pre-convert input to fp32 to avoid redundant conversions in inner loop
             float *input_f32 = (float *)bak_gate_input_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int h = 0; h < config_.hidden_size; h++) {
                 input_f32[t * config_.hidden_size + h] = ggml_bf16_to_fp32(input[t * config_.hidden_size + h]);
@@ -3111,9 +3117,11 @@ public:
 
             // grad_A[r, h] += sum_t(temp_grad[t,r] * input[t,h]) * scaling
             // Note: Only multiply by scaling once (not scaling²)
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int r = 0; r < config_.lora_rank; r++) {
               for (int h = 0; h < config_.hidden_size; h++) {
                 float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int t = 0; t < num_tokens; t++) {
                   sum += temp_grad[t * padded_lora_rank_ + r] * input_f32[t * config_.hidden_size + h];
                 }
@@ -3153,6 +3161,7 @@ public:
             lora_up_inter_bc_[expert_idx]->to_mat(num_tokens, lora_inter_bf16, 0, 1);
 
             float *lora_inter = (float *)bak_up_lora_inter_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int r = 0; r < padded_lora_rank_; r++) {
                 lora_inter[t * padded_lora_rank_ + r] = ggml_bf16_to_fp32(lora_inter_bf16[t * padded_lora_rank_ + r]);
@@ -3164,6 +3173,7 @@ public:
 
             // Pre-convert up_grad to fp32 to avoid redundant conversions in inner loop
             float *up_grad_f32 = (float *)bak_up_grad_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int i = 0; i < config_.intermediate_size; i++) {
                 up_grad_f32[t * config_.intermediate_size + i] = ggml_bf16_to_fp32(up_grad[t * config_.intermediate_size + i]);
@@ -3171,10 +3181,11 @@ public:
             }
 
             float scaling = config_.lora_scaling;
-
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int i = 0; i < config_.intermediate_size; i++) {
               for (int r = 0; r < config_.lora_rank; r++) {
                 float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int t = 0; t < num_tokens; t++) {
                   sum += up_grad_f32[t * config_.intermediate_size + i] * lora_inter[t * padded_lora_rank_ + r];
                 }
@@ -3214,6 +3225,7 @@ public:
             lora_up_temp_grad_bc_[expert_idx]->to_mat(num_tokens, temp_grad_bf16, 0, 1);
 
             float *temp_grad = (float *)bak_up_temp_grad_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int r = 0; r < padded_lora_rank_; r++) {
                 temp_grad[t * padded_lora_rank_ + r] = ggml_bf16_to_fp32(temp_grad_bf16[t * padded_lora_rank_ + r]);
@@ -3225,6 +3237,7 @@ public:
 
             // Pre-convert input to fp32 to avoid redundant conversions in inner loop
             float *input_f32 = (float *)bak_up_input_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int h = 0; h < config_.hidden_size; h++) {
                 input_f32[t * config_.hidden_size + h] = ggml_bf16_to_fp32(input[t * config_.hidden_size + h]);
@@ -3238,6 +3251,7 @@ public:
             for (int r = 0; r < config_.lora_rank; r++) {
               for (int h = 0; h < config_.hidden_size; h++) {
                 float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int t = 0; t < num_tokens; t++) {
                   sum += temp_grad[t * padded_lora_rank_ + r] * input_f32[t * config_.hidden_size + h];
                 }
@@ -3283,6 +3297,7 @@ public:
             // }
 
             float *lora_inter = (float *)bak_down_lora_inter_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int r = 0; r < padded_lora_rank_; r++) {
                 lora_inter[t * padded_lora_rank_ + r] = ggml_bf16_to_fp32(lora_inter_bf16[t * padded_lora_rank_ + r]);
@@ -3294,6 +3309,7 @@ public:
 
             // Pre-convert down_grad_weighted to fp32 to avoid redundant conversions in inner loop
             float *down_grad_weighted_f32 = (float *)bak_down_grad_weighted_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int h = 0; h < config_.hidden_size; h++) {
                 down_grad_weighted_f32[t * config_.hidden_size + h] = ggml_bf16_to_fp32(down_grad_weighted[t * config_.hidden_size + h]);
@@ -3303,9 +3319,11 @@ public:
             ggml_bf16_t *grad_B_dst = (ggml_bf16_t *)config_.grad_down_lora_B + expert_idx * config_.hidden_size * config_.lora_rank;
 
             float scaling = config_.lora_scaling;
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int h = 0; h < config_.hidden_size; h++) {
               for (int r = 0; r < config_.lora_rank; r++) {
                 float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int t = 0; t < num_tokens; t++) {
                   sum += down_grad_weighted_f32[t * config_.hidden_size + h] * lora_inter[t * padded_lora_rank_ + r];
                 }
@@ -3347,6 +3365,7 @@ public:
             lora_down_temp_grad_bc_[expert_idx]->to_mat(num_tokens, temp_grad_bf16, 0, 1);
 
             float *temp_grad = (float *)bak_down_temp_grad_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int r = 0; r < padded_lora_rank_; r++) {
                 temp_grad[t * padded_lora_rank_ + r] = ggml_bf16_to_fp32(temp_grad_bf16[t * padded_lora_rank_ + r]);
@@ -3358,6 +3377,7 @@ public:
 
             // Pre-convert intermediate to fp32 to avoid redundant conversions in inner loop
             float *intermediate_f32 = (float *)bak_down_intermediate_f32_ptr[expert_idx];
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int t = 0; t < num_tokens; t++) {
               for (int i = 0; i < config_.intermediate_size; i++) {
                 intermediate_f32[t * config_.intermediate_size + i] = ggml_bf16_to_fp32(intermediate[t * config_.intermediate_size + i]);
@@ -3368,9 +3388,11 @@ public:
 
             // grad_A[r, i] += sum_t(temp_grad[t,r] * intermediate[t,i]) * scaling
             // Note: Only multiply by scaling once (not scaling²)
+            #pragma omp parallel for collapse(2) schedule(dynamic)
             for (int r = 0; r < config_.lora_rank; r++) {
               for (int i = 0; i < config_.intermediate_size; i++) {
                 float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int t = 0; t < num_tokens; t++) {
                   sum += temp_grad[t * padded_lora_rank_ + r] * intermediate_f32[t * config_.intermediate_size + i];
                 }
